@@ -17,6 +17,7 @@ interface AuthContextValue {
   permissions: Permission[];
   loading: boolean;
   signingOut: boolean;
+  authError: string | null;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
 }
@@ -29,9 +30,12 @@ const AuthContext = createContext<AuthContextValue>({
   permissions: [],
   loading: true,
   signingOut: false,
+  authError: null,
   signOut: async () => {},
   refresh: async () => {},
 });
+
+const AUTH_TIMEOUT_MS = 15000;
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
@@ -41,7 +45,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [permissions, setPermissions] = useState<Permission[]>([]);
   const [loading, setLoading] = useState(true);
   const [signingOut, setSigningOut] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const signingOutRef = useRef(false);
+  const loadingResolvedRef = useRef(false);
 
   const loadUserData = useCallback(async (userId: string) => {
     try {
@@ -81,6 +87,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } else {
         setPermissions([]);
       }
+      setAuthError(null);
     } catch {
       setProfile(null);
       setRoles([]);
@@ -90,14 +97,36 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let mounted = true;
+    loadingResolvedRef.current = false;
 
-    supabase.auth.getSession().then(async ({ data: { session: s } }) => {
+    const timeoutId = setTimeout(() => {
+      if (mounted && !loadingResolvedRef.current) {
+        setAuthError("Le chargement prend plus de temps que prévu. Vérifiez votre connexion et réessayez.");
+        setLoading(false);
+      }
+    }, AUTH_TIMEOUT_MS);
+
+    supabase.auth.getSession().then(async ({ data: { session: s }, error }) => {
       if (!mounted) return;
+      if (error) {
+        setAuthError("Impossible de récupérer la session. Veuillez vous reconnecter.");
+        loadingResolvedRef.current = true;
+        setLoading(false);
+        return;
+      }
       setSession(s);
       setUser(s?.user ?? null);
       if (s?.user) {
         await loadUserData(s.user.id);
       }
+      if (mounted) {
+        loadingResolvedRef.current = true;
+        setLoading(false);
+      }
+    }).catch(() => {
+      if (!mounted) return;
+      setAuthError("Erreur lors de la récupération de la session.");
+      loadingResolvedRef.current = true;
       setLoading(false);
     });
 
@@ -115,11 +144,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setRoles([]);
         setPermissions([]);
       }
-      setLoading(false);
+      if (mounted) {
+        loadingResolvedRef.current = true;
+        setLoading(false);
+        setAuthError(null);
+      }
     });
 
     return () => {
       mounted = false;
+      clearTimeout(timeoutId);
       subscription.unsubscribe();
     };
   }, [loadUserData]);
@@ -152,13 +186,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const refresh = useCallback(async () => {
     if (user) {
+      setAuthError(null);
+      setLoading(true);
+      loadingResolvedRef.current = false;
+
+      const timeoutId = setTimeout(() => {
+        if (!loadingResolvedRef.current) {
+          setAuthError("Le chargement prend plus de temps que prévu. Vérifiez votre connexion.");
+          setLoading(false);
+        }
+      }, AUTH_TIMEOUT_MS);
+
       await loadUserData(user.id);
+      loadingResolvedRef.current = true;
+      setLoading(false);
+      clearTimeout(timeoutId);
     }
   }, [user, loadUserData]);
 
   return (
     <AuthContext.Provider
-      value={{ session, user, profile, roles, permissions, loading, signingOut, signOut, refresh }}
+      value={{ session, user, profile, roles, permissions, loading, signingOut, authError, signOut, refresh }}
     >
       {children}
     </AuthContext.Provider>
